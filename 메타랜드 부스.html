@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Auto Hacker Typer — Auto Mode</title>
+    <style>
+      :root{
+        --bg:#000;
+        --fg:#7CFF7C;
+        --dim:#194019;
+        --mono: "Consolas", "Courier New", monospace;
+      }
+
+      html,body{
+        height:100%;
+        margin:0;
+        background:var(--bg);
+        color:var(--fg);
+        font-family:var(--mono);
+        overflow:hidden;
+      }
+
+      #screen{
+        box-sizing:border-box;
+        width:100%;
+        height:100%;
+        padding:18px 24px;
+        font-size:14px;
+        line-height:1.35;
+        white-space:pre-wrap;
+        overflow:hidden;
+        display:flex;
+        flex-direction:column;
+        justify-content:flex-end;
+      }
+
+      .line{
+        display:block;
+        opacity:0;
+        transform:translateY(6px);
+        animation:appear 200ms forwards;
+      }
+
+      @keyframes appear{
+        to{opacity:1;transform:none}
+      }
+
+      /* 파일명/키워드 강조 스타일 — 진짜 느낌 */
+      .kw{color:var(--fg);font-weight:600}
+      .dim{color:var(--dim)}
+
+      /* 깜빡이는 커서 (우측 하단 고정 아님, 라인 끝에 붙도록 사용) */
+      .cursor{
+        display:inline-block;
+        width:10px;
+        height:1em;
+        background:var(--fg);
+        vertical-align:bottom;
+        margin-left:4px;
+        animation:blink 1s steps(2) infinite;
+      }
+
+      @keyframes blink{50%{opacity:0}}
+
+      /* CRT 노이즈 (가볍게) */
+      .crt {
+        pointer-events:none;
+        position:fixed;
+        inset:0;
+        mix-blend-mode:overlay;
+        background-image: linear-gradient(rgba(255,255,255,0.01) 1px, transparent 1px);
+        background-size:100% 2px;
+        opacity:0.02;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="screen" aria-live="polite" role="log"></div>
+    <div class="crt" aria-hidden="true"></div>
+
+    <script>
+      // ---------- 사용자 설정 (필요하면 코드에서 직접 수정) ----------
+      const LINES_BEFORE_CLEAR = 120; // 화면이 차면 제거(무한 루프)
+      const TICK_MIN = 0; // 글자 간 최소 딜레이(ms)
+      const TICK_MAX = 25; // 글자 간 최대 딜레이(ms)
+      const LINE_PAUSE = 40; // 라인 사이 기본 대기(ms)
+      const COMMAND_INTERVAL = 18; // 명령어/출력 섞이는 빈도 (작을수록 자주 명령어)
+
+      // ---------- 출력 영역 ----------
+      const screen = document.getElementById('screen');
+
+      // ---------- 트리/디렉토리 샘플 (원하면 편집) ----------
+      const sampleTree = [
+        "C:\\>",
+        "C:\\> cd projects\\club-booth",
+        "C:\\projects\\club-booth> dir",
+        " Volume in drive C is OS",
+        " Volume Serial Number is 1A2B-3C4D",
+        "",
+        " Directory of C:\\projects\\club-booth",
+        "2025-10-30 10:00 <DIR> .",
+        "2025-10-30 10:00 <DIR> ..",
+        "2025-10-29 21:15 1,234 README.md",
+        "2025-10-29 20:40 9,876 index.html",
+        "2025-10-29 20:42 45,678 hacker_rain.html",
+        "2025-10-30 09:12 12,345 assets.js",
+        "2025-10-28 14:00 678 style.css",
+        "2025-10-27 18:22 <DIR> build",
+        "",
+        "C:\\projects\\club-booth> tree /F",
+        "Folder PATH listing for volume OS",
+        "C:\\projects\\club-booth",
+        "| README.md",
+        "| index.html",
+        "| hacker_rain.html",
+        "| assets.js",
+        "| style.css",
+        "|",
+        "  build",
+        "    bundle.js",
+        ""
+      ];
+
+      // ---------- 일부 '해커 코드' 템플릿 (보여주는 랜덤 코드) ----------
+      const fakeCodeSnippets = [
+        "for (let i = 0; i < N; ++i) { doHeavyWork(i); }",
+        "eval(decodeURIComponent('%75%6E%6B%6E%6F%77%6E'))",
+        "if (socket.open) socket.send(JSON.stringify({cmd:'scan', id:rand()}));",
+        "function crack(key){ return key.split('').reverse().join(''); }",
+        "/* scanning ports: 22, 80, 443... */",
+        "0x4A, 0x6F, 0x69, 0x6E, 0x21",
+        "git fetch --all && git checkout --force origin/main",
+        "ssh user@192.168.0." + ((Math.random()*200)|0),
+        "while(true) { process.nextTick(()=>{}); } // busy loop",
+        "/* permission denied - escalating... */",
+        "docker run --rm --privileged alpine sh -c 'sleep 9999'"
+      ];
+
+      // ---------- 작은 유틸 ----------
+      function rand(min, max){
+        return Math.floor(Math.random()*(max-min+1)) + min;
+      }
+
+      function randItem(arr){
+        return arr[Math.floor(Math.random()*arr.length)];
+      }
+
+      // ---------- 타이핑 시뮬레이션 ----------
+      async function typeLine(text, opts = {}) {
+        // opts: highlightRegex (RegExp), prompt (string)
+        const container = document.createElement('div');
+        container.className = 'line';
+        screen.appendChild(container);
+
+        // 프롬프트 처리 (있으면 앞에 그려놓기)
+        if (opts.prompt) {
+          const p = document.createElement('span');
+          p.className = 'dim';
+          p.textContent = opts.prompt + ' ';
+          container.appendChild(p);
+        }
+
+        // 타이핑
+        for (let i = 0; i < text.length; i++) {
+          const ch = text[i];
+
+          // 간단한 키워드 강조 (파일 확장자)
+          if (ch === '<' || ch === '>') {
+            // just append raw
+            container.appendChild(document.createTextNode(ch));
+          } else {
+            container.appendChild(document.createTextNode(ch));
+          }
+
+          // 스크롤 유지
+          container.scrollIntoView({ behavior: 'auto', block: 'end' });
+
+          await new Promise(r => setTimeout(r, rand(TICK_MIN, TICK_MAX)));
+        }
+
+        // 커서 플래시 잠깐 보여주기
+        const cursor = document.createElement('span');
+        cursor.className = 'cursor';
+        container.appendChild(cursor);
+        await new Promise(r => setTimeout(r, 80 + rand(0, 100)));
+        container.removeChild(cursor);
+
+        // post-line pause
+        await new Promise(r => setTimeout(r, LINE_PAUSE + rand(0, 100)));
+
+        maintainLines();
+      }
+
+      // 화면에 너무 많은 라인이 쌓이면 위에서 제거 (부드러운 루프)
+      function maintainLines(){
+        while (screen.children.length > LINES_BEFORE_CLEAR){
+          screen.removeChild(screen.firstChild);
+        }
+      }
+
+      // ---------- 자동 루프 (명령어와 출력 섞기) ----------
+      async function autoLoop(){
+        // Mix: occasionally print a "tree/dir" block, otherwise random code lines
+        while (true){
+          const mode = (Math.random() * COMMAND_INTERVAL) < 1 ? 'tree' : 'code';
+
+          if (mode === 'tree'){
+            // print one full tree sequence (each line)
+            for (const line of sampleTree){
+              // simulate prompt for lines that look like 'C:\...>'
+              if (line.match(/\\>$/)){
+                await typeLine(line, { prompt: '' });
+              } else {
+                // outputs (no prompt)
+                await typeLine(line);
+              }
+            }
+
+            // short pause between trees
+            await new Promise(r => setTimeout(r, 700 + rand(0, 700)));
+
+          } else {
+            // a burst of code-ish lines
+            const burst = rand(3, 9);
+            for (let i = 0; i < burst; i++){
+              // sometimes include a fake warning or status
+              const roll = Math.random();
+              let ln;
+
+              if (roll < 0.12) ln = "[SCAN] Found service at 192.168." + rand(0,255) + "." + rand(1,254);
+              else if (roll < 0.2) ln = "[WARN] permission denied: /etc/shadow";
+              else if (roll < 0.3) ln = ">> " + randItem(fakeCodeSnippets);
+              else ln = randItem(fakeCodeSnippets);
+
+              await typeLine(ln, { prompt: (Math.random() < 0.06) ? "root@host:" : undefined });
+            }
+
+            await new Promise(r => setTimeout(r, 300 + rand(0, 500)));
+          }
+
+          // small gap to let the screen breathe
+          await new Promise(r => setTimeout(r, 120 + rand(0, 250)));
+        }
+      }
+
+      // 시작 (자동)
+      autoLoop().catch(e => console.error(e));
+    </script>
+  </body>
+</html>
